@@ -1,0 +1,46 @@
+#!/bin/sh
+
+name=$(echo $1 | sed 's/_/\\\\_/g')
+
+echo '\\begin{DoxyDocu}{'${name}'}'
+
+skript1=$(cat <<'SKRIPT1'
+s/[$]\\ast[$]/*/g                           # translate some artifacts
+s/\\-//g                                    # \-
+s/\\[+]//g                                  # \+
+s:\\/::g                                    # \/
+s/[ \t]*$//                                 # trainling spaces
+SKRIPT1
+)
+
+skript2='1,/index{'${name}'@/ d;'           # find the start of section $name
+skript2=$skript2$(cat <<'SKRIPT2'
+1,/^$/ {                                    # up to the second empty line
+  /label/ !d                                # skip the preamble
+  s/.*\\label/\\label/                      # but keep the label,
+  P                                         ## which is last
+  N                                         # read the next line (empty)
+  d                                         # and delete it immediately
+}
+/Definition at\|index/,$ d                  # quit at end of section
+s/{\\ttfamily /\\code{/g                    # ttfamily is code
+/\\par$/ {                                  # repair '\n' in \code{}
+ s/\\par$/\\\\n/                            ## replace \par by \\n
+ N                                          ## join in the next line
+ s/\n//g                                    ##
+}                                           ##
+/\\newline$/ {                              # repair '\n' in \code{}
+ s/~\\newline$/\\\\n/                       ## replace \newline by \\n
+ N                                          ## join in the next line
+ s/\n//g                                    ##
+}                                           ##
+p                                           #
+SKRIPT2
+)
+
+#echo "$skript2" >&2
+#sed -e "$skript1" $2 >&2
+
+sed -e "$skript1" $2 | sed -n -e "$skript2"
+
+echo '\\end{DoxyDocu}'

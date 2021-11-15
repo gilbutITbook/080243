@@ -1,0 +1,19 @@
+#!/bin/sh
+
+skript=$(
+cat <<'SKRIPT'
+/\/[*/]/ !{ p; d }                               # skip line with nothing to do
+s:^\([^/]*\([/][^/*]\)*\)//.*:\1:                # detect C++ comments before C comments
+/\/\*/ s:/[*]\([^*]*\([*]*[^/]\)*\)*[*][/]: :g   # detect complete C comments
+s:^\([^/]*\([/][^/*]\)*\)//.*:\1:                # detect remaining C++ comment
+/\/\*/ !{ p; d }                                 # nothing more to do
+s:\/[*].*: :                                     # delete the start of a C comment
+n                                                # get the next line
+/^[ ]*$/ D                                       # delete empty start
+s:^:\n/*:                                        # insert a comment opener and
+D                                                # start over
+SKRIPT
+)
+
+exec sed -n -e "$skript" $*
+
