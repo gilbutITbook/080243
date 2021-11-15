@@ -1,0 +1,30 @@
+#!/bin/sh -f
+
+CHAR=${CHAR:-"_"}
+EXT=${EXT:-'\.h'}
+files=$(ar t $1)
+
+for f in ${files} ; do
+    base="${f%${EXT}}"
+    if [ "${base}" != "${f}" ] ; then
+        basic=$(echo "${base}" | sed "s/#/${CHAR}/g")
+        cat <<EOF
+/* This traditional -*- C -*- header file is automatically */
+/* extracted for a Modular C project.                      */
+/* DON'T MODIFY IT MANUALLY!                               */
+
+#ifdef GUARD${CHAR}${basic}${CHAR}HEADER
+#define GUARD${CHAR}${basic}${CHAR}HEADER 1
+
+/* The automatically deduced dependencies: */
+EOF
+        ar p $1 "${base}-unique.txt"               \
+            | sed 's/.*/#include "&.h"/1'
+        ar p $1 "${f}"                             \
+            | c++filt                              \
+            | sed "s/^#[ ]*[0-9].*//1; s/_C:://g;" \
+            | sed "s/::/${CHAR}/g"                 \
+            | sed -n '/_Intern/d; p'
+        echo "\n#endif /* ${base} */"
+    fi
+done

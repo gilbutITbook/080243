@@ -1,0 +1,5 @@
+#!/bin/sh -f
+
+CHAR=${CHAR:-"◼"}
+
+sed "s/◼/::/g"  $* | strings -2 | c++filt | sed "s/_C:://g; s/::/${CHAR}/g;"

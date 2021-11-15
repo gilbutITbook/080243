@@ -1,0 +1,119 @@
+#!/bin/sh -f
+
+# mangle a list of identifiers separated by '#'
+mangleStart="_ZN2_C"
+mangleEnd="E"
+
+mangleID () {
+    local name=""
+    local IFS=" 	#"
+    for n in $* ; do
+        name="${name}${#n}${n}"
+    done
+    echo "${name}"
+}
+
+mangle () {
+    if [ "${1###}" = "$1" ]; then
+        echo "${mangleStart}$(mangleID $*)${mangleEnd}"
+    else
+        echo "${1###}"
+    fi
+}
+
+splitjoin0 () {
+    for i in $*; do
+        echo -n "$i "
+    done
+}
+
+splitjoin1 () {
+    if [ $# -lt 2 ]; then
+        exit 0
+    fi
+    local j="$1"
+    shift
+    ret="$1"
+    shift
+    for i in $*; do
+        ret="${ret}${j}${i}"
+    done
+    echo "${ret}"
+}
+
+splitjoin () {
+    osep="$1"
+    nsep="$2"
+    shift 2
+    local IFS="$osep"
+    list="$(splitjoin0 $*)"
+    IFS=" "
+    splitjoin1 "${nsep}" $list
+}
+
+tmpd=`mktemp -d "/tmp/tmp-XXXXXXXXXXXXXXXX"`
+tmpf="${tmpd}/tot.txt"
+touch "${tmpf}"
+for archive in $*; do
+    touch "${tmpf}"
+    modname=${archive%.a}
+    for f in $(ar tf ${archive}); do
+        case "$f" in
+            (*-docu.txt)
+                echo "| $(mangle ${modname})	0|+++++++++++++++++++++++++++++++++++++++++++++++++" >>"${tmpf}"
+                echo "| $(mangle ${modname})	0|zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz" >>"${tmpf}"
+                for n in $(ar pPf "${archive}" "$f" | sed 's/[ ][ ]*//g'); do
+                    a="${n%%:*}"
+                    d="${n#*:}"
+                    if [ -n "$a" ]; then
+                        echo "| $a	0| $d"              >>"${tmpf}"
+                    else
+                        echo "| $(mangle ${modname})	0| $d" >>"${tmpf}"
+                    fi
+                done
+                ;;
+        esac
+    done
+done
+
+LANG=C cat "${tmpf}"                           \
+    | c++filt                                  \
+    | sed '
+s/_C:://1
+s/::/0a0a0a0a0a0a0a0a/g
+s/^\(.*\)| \(.*\);modtop$/\1|0 \2/1
+'                                              \
+    | sort -u                                  \
+    | sed '
+s/	0|/	|/g
+s/0a0a0a0a0a0a0a0a/	|/g
+/|[ ]*predeclared$/d
+/|[ ]*inherited$/d
+/\<__/d
+s/evaluated;object;macro/value macro/g
+s/evaluated;=/=/g
+s/inherited;macro/platform macro/g
+s/function;macro/function macro/g
+s/object;macro/simple macro/g
+s/inherited;//g
+s/extern;predefined/provided/g
+s/enumeration;type/enumeration type/g
+s/\([a-z][a-z]*\)\(;\1\)\(;\1\)*/\1/g
+s/|0\(.*\)$/|[1;34m\1[0m/1
+s/type;\(.*\);type/type;\1/g
+s/type;=\([a-zA-Z0-9_]*\)/type [1;31m\1[0m[3;33m/g
+#s/platform macro;=\([a-zA-Z0-9_]*\)/platform macro [1;31m\1[0m[3;33m/g
+s/=\([a-zA-Z0-9_]*\);type/platform type [1;31m\1[0m[3;33m/g
+s/type;platform type/platform type/g
+s/|[ 	][ 	]*$/| [1;30munidentified[0m[3;33m/g
+s/[^|]*$/[3;33m&[0m/g
+s/:=\([a-zA-Z_0-9#]*\)/fill [1;31m\1[0m[3;33m/g
+s/=\([a-zA-Z_0-9#]*\)/[1;31m\1[0m[3;33m/g
+s/+>\([a-zA-Z_0-9#]*\)/aliased [1;31m\1[0m[3;33m/g
+s/->[a-zA-Z_0-9#]*/[1;34m&[0m[3;33m/g
+s/<-[a-zA-Z_0-9#]*/[1;35m&[0m[3;33m/g
+s/+[0-9][0-9]*/[1;32m&[0m[3;33m/g
+s/;\([-+a-z]\)/; \1/g
+'
+
+rm -rf "${tmpd}"

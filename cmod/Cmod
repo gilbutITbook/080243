@@ -1,0 +1,2253 @@
+#!/bin/sh -f
+
+# Cmod -- a reference implementation of Modular C
+# © Jens Gustedt, 2015, all rights reserved.
+
+####### Prerequisites
+
+# This project needs a C compiler (sought in the CC environment
+# variable) that is conforming as much as possible to C11. Newer
+# versions of gcc or clang should do.
+
+# Older versions of compilers might have difficulties when the C11
+# feature detection macros are not properly set up for the
+# platform. Try compiling with options
+
+# -std=c11 -D__STDC_NO_ATOMIC__=1 -D__STDC_NO_THREADS__=1
+
+# for a minimal compilation without atomics and threads.
+
+# If your C library doesn't implement threads, yet, a good choice
+# would be the musl C library. It can simply be used by setting
+
+# CC=/path/to/musl/bin/musl-gcc
+
+# With the source of this file here, you also find a small utility,
+# makeheaders.c, that was originally written by Richard Hipp and
+# slightly adapted to our needs. You should compile this program with
+# something like.
+
+# make makeheaders
+
+
+####### Command line options
+
+# This script filters the command line for three types of arguments
+
+# -c, -M, -S, or -E to determine the job to be done
+#   if none is given, produce an executable
+#   -c compiles to a binary object, usually a .a file
+#   -S for assembler
+#   -E preprocessor expansion
+#   -M produces an include file for make
+# -o filename to determine the target file name
+#   defaults to "module#name.a" for "-c" and "module#name" for executables
+#   if the source file contains no module directive the modulename is
+#   equal to the filename
+# filename.[Xa] for the source name
+#   If this is .X, the file is compiled to a .a file.
+#   For .a the module is linked to an executable. For this to work the
+#   module must include an "entry" directive that points to a valid
+#   function to execute initially.
+
+# .a files for individual modules may be combined into bigger .a
+# files, such as we do this here to produce libC.a, the stub archive
+# to interface the standard C library. To use such a prepared .a file
+# for a compilation, you should list it in the environement variable
+# CMOD_ARCHIVES. Still you then need the usual linker option such as
+# -lC for the final linking phase of an executable
+
+##### Description of the procedure
+
+# (0) Command line processing and beautification to be compatible with
+#     other compiler interfaces. Interprets -c, -E, -S and -o
+#     parameters, e.g. and removes spaces around # characters.
+
+# (1) The module directive "[localID=]compositeID" reserves
+#     compositeID as moduleID for the current TU. If there is no
+#     module directive, the basename of the TU is used. If present,
+#     localID serves as an abbreviation for moduleID in the context of
+#     the current TU.
+
+# (2) Each import directive "[localID=]compositeID", where compositeID
+#     is of the form "[compositePrefix#]remoteID", gives access to the
+#     identifiers of the module compositeID. An identifier NAME in
+#     that module can be refered to in three ways.
+
+#     (a) compositeID#NAME
+#     (b) If localID had been defined, localID#NAME is replaced by
+#         compositeID#NAME
+#     (c) The name localID itself without suffix stands for the
+#         identifier compositeID, if that module exports that
+#         identifier.
+
+#     The identifier localID shall not conflict with any other local
+#     identifier that is used in the TU.
+
+# (3) Each slot directive "localID[=<requirements>]" forces the
+#     interpretation of localID as a member of this TU, that is
+#     localID is replaced by moduleID#localID, everywhere.
+
+# (4) "requirements" issued in slot directives are integrated right
+#     after a snippet directive, if any.
+#     - Requirements starting with 'typedef', 'complete' and 'ice'
+#       force the localID to be an object type, a complete object type
+#       or an integer constant expression (ICE), respectively. Then,
+#       the content of "requirements" is otherwise ignored.
+#     - Requirement starting with "extern" or "static" must be
+#       declaration of the slot localID identifer, suitable to be
+#       placed at the start of the corresponding snippet.
+#     - Otherwise the requirement is interpreted as an object type, to
+#       which localID must be assignable.
+
+# (5) composite names that are detected up to now are mangled
+
+# (6) a snippet directive causes the remaining part of the program
+#     text to be cut off and disguared for the current compilation of
+#     moduleID TU. It is later added as moduleID-snippet.c to the
+#     module object, such that importers of moduleID can refer to
+#     it. It contains the mangled requirements that have been produced
+#     in (4).
+
+# (7) The snippets of all explictly imported modules are appended to
+#     the TU. The order is the order in which the import directives
+#     occur.
+
+# (8) If needed, an internal function _ModuleInit is generated in a
+#     separate TU moduleID-init.c that calls the corresponding
+#     _ModuleInit functions for all directly imported modules. After
+#     that:
+#     - If there are any, it inserts functions given with an 'atexit'
+#       directive in the atexit queue
+#     - If there are any, it inserts functions given with an
+#       'at_quick_exit' directive in the at_quick_exit queue
+#     - If there are any, it calls the functions given with an 'init'
+#       directive.
+
+# (9) An description moduleID.h (~ a traditional .h header file) of
+#     the module is produced, safed and prepended to the TU. This
+#     declaration description contains all code that is in declaration
+#     sections, and all interfaces of objects and functions with
+#     external linkage. All struct, union and enum declarations
+#     therein are acompanied with suitable typedef declarations to
+#     import the tag name to the identifier space.
+
+# (A) A list of modules that are to be imported is produced. This list
+#     contains all directly or indirectly imported modules in an order
+#     that is consistent with the import relation.
+
+# (B) The declarations from all imported modules are prepended to the
+#     TU, in the order of that list.
+
+# (C) All fill directives are replaced (this goes from mangled names
+#     -> mangled names)
+
+# (D) The TU is compiled to moduleID.o
+
+# (E) If the TU contains one or multiple entry directives, a function
+#     #main is generated in a separate TU moduleID-main.c It first
+#     calls the internal function _ModuleInit and then the designated
+#     entry functions. The entry functions must have one of the forms
+
+#     int NAME(void);
+#     int NAME(int, char**);
+#     int NAME(int*, char***);
+
+#     where the latter form correponds to initialization functions
+#     that will need to modify the argument vector, as does e.g
+#     MPI_Init. These functions are executed in declaration order of
+#     the entry directives; if any of them returns a non-zero value,
+#     execution stops and that value is the exit status of the
+#     process.
+
+# (F) an archive moduleID.a is produced that contains moduleID.o,
+#     moduleID.h moduleID-snippet.c. as well as moduleID-init.o files
+#     for moduleID-main.o, where applicable. It also contains some
+#     more text files as may be needed during the import process to
+#     transfer information to the importer.
+
+######## Naming
+
+# Different separators for the components of a name are possible.
+# This can be chosen relatively freely, the only constraint is that it
+# shouldn't be a character that can appear between identifiers in
+# normal C text. So this rules out almost all arithmetic operators,
+# comparison operators, and "?" ":" ".". Characters " and ' wouldn't
+# work because of wide characters and strings such as L'a' or u8"tutu"
+# that would be followed by a macro name, e.g wprintf(L"tutu%"PRIu64, i).
+
+# We could invent a new digraph, ::, %%, <>, ><, {}, }{, ??
+
+# Or use some unicode character, candidats are @, ~, `, ·, ◼, ※, ▣,
+# ::, ⫻, ‖, ❚, ⎕, ►, ➰,
+
+# The environment variable CMOD_LEGSEP controls if legacy interfaces
+# are generated as aliases. It should contain a separator string that
+# is then used to create alternative symbols (aliases) that can be
+# used by legacy applications to link against the module. Supported
+# values:
+
+#    _   snail_case_identifiers
+#    C   camelCaseIdentifiers.
+#    P   PascalCaseIdentifiers.
+
+# If this is used, tentative definitions should not be issued as
+# common symbols as do some compilers as an extension of the C
+# model. For gcc and friends use -fno-common to force such definitions
+# to be emitted as "normal" symbols.
+
+####### Other dependencies
+
+# This script uses a handful of executables that could be tuned, if
+# they are hidden outside the PATH. Here is the list with the default
+# settings:
+
+AR=${AR:=ar}      # <<<< BEWARE that this is special
+CAT=${CAT:=cat}
+CC=${CC:=c99}
+CP=${CP:=cp}
+CPP=${CPP:=${CC} -E -x c}
+LD=${LD:=ld}
+LESS=${LESS:=less}
+MV=${MV:=mv}
+NM=${NM:=nm}
+OBJCOPY=${OBJCOPY:=objcopy}
+RM=${RM:=rm}
+SED=${SED:=sed}
+SORT=${SORT:=sort}
+
+####################### No customization beyond this point
+case "$*" in
+    (*\ --help*)
+        ${SED} -n '/Cmod/,/beyond/ {
+                      /beyond/ d
+                      s/^# //1
+                      p
+                   }' $0 | ${LESS}
+        exit 0
+        ;;
+esac
+
+WD="$(pwd)"
+WE=${0##*/}
+EXEDIR=${0%%${WE}}
+
+# tuneables for this script
+
+# This implementation uses # internally, but that character is not
+# suitable externally, since it is used by the preprocessor.
+isep="#"
+
+CMOD_PATH=${CMOD_PATH:="${WD}:."}
+CMOD_ARCHIVES=${CMOD_ARCHIVES:=""}
+CMOD_DIR=${CMOD_DIR:="."}
+CMOD_A=${CMOD_A:=.a}
+CMOD_X=${CMOD_X:=.X}
+CMOD_D=${CMOD_D:=.dep}
+TMP=${TMP:=/tmp}
+
+match () {
+    eval "case '$2' in $1) return 0;; *) return 1;; esac"
+    return $?
+}
+
+realpath () {
+    path=$1
+    if match "${path}" "./*" ; then
+        path=${WD}${path#\./}
+        path="${path}/"
+    elif [ "${path##/}" = "${path}" ] ; then
+        path=${WD}"/"${path}
+    fi
+    echo ${path} | ${SED} 's|[^/]*/[.][.]/||g; s|/[.]/|/|g'
+}
+
+EXEDIR=$(realpath ${EXEDIR})
+
+MAKEHEADERS=${MAKEHEADERS:=${EXEDIR}makeheaders}
+
+ignore () {
+    return 0;
+}
+
+complain () {
+    echo "${WE}: $*" 1>&2
+}
+
+if [ -z "${CMOD_VERBOSE}" ] ; then
+    alias report=ignore
+else
+    alias report=complain
+fi
+
+die () {
+    complain "$*"
+    exit 1
+}
+
+# A simple hash table interface. All functions have the name of the
+# hash itself as first argument, and the key as second.
+hashed () {
+    local hash="$1"
+    local key="$2"
+    local def="$3"
+    eval "echo \${HASH_${hash}_IN_${key}_HSAH:-${def}}"
+}
+hashin () {
+    local hash="$1"
+    local key="$2"
+    local val="$3"
+    eval "HASH_${hash}_IN_${key}_HSAH='${val}'"
+}
+# This collects data in a hash position as a ;-separated list
+hashadd () {
+    local hash="$1"
+    local key="$2"
+    local val="$3"
+    local prev=$(hashed "$1" "$2" "")
+    if [ -n "${prev}" ] && [ "${prev}" != "${val}" ]; then
+        val="${prev};${val}"
+    fi
+    eval "HASH_${hash}_IN_${key}_HSAH='${val}'"
+}
+
+splitjoin0 () {
+    for i in $*; do
+        echo -n "$i "
+    done
+}
+
+splitjoin1 () {
+    [ $# -ge 2 ] \
+        || die "need at least two arguments for splitjoin1"
+    local j="$1"
+    shift
+    ret="$1"
+    shift
+    for i in $*; do
+        ret="${ret}${j}${i}"
+    done
+    echo "${ret}"
+}
+
+splitjoin () {
+    osep="$1"
+    nsep="$2"
+    shift 2
+    local IFS="$osep"
+    list="$(splitjoin0 $*)"
+    IFS=" "
+    splitjoin1 "${nsep}" $list
+}
+
+camelCase () {
+    local ret="$1"
+    shift
+    local start
+    local end
+    for w in $* ; do
+        end="${w#[a-z]}"
+        start=$(echo ${w%${end}} | sed y/abcdefghijklmnopqrstuvwxyz/ABCDEFGHIJKLMNOPQRSTUVWXYZ/)
+        end=$(echo ${end} | sed y/ABCDEFGHIJKLMNOPQRSTUVWXYZ/abcdefghijklmnopqrstuvwxyz/)
+        ret="$ret${start}${end}"
+    done
+    echo -n $ret
+}
+
+
+legacy () {
+    case "${CMOD_LEGSEP}" in
+        (C)
+            res=$(splitjoin "#" " " $*)
+            camelCase $res
+            ;;
+        (P)
+            res=$(splitjoin "#" " " $*)
+            camelCase "" $res
+            ;;
+        (*)
+            splitjoin "#" "${CMOD_LEGSEP}" $*
+            ;;
+    esac
+}
+
+
+kws='
+_Alignas
+_Alignof
+_Atomic
+_Bool
+_Complex
+_Generic
+_Imaginary
+_Noreturn
+_Static_assert
+_Thread_local
+__attribute__
+__typeof__
+char
+class
+const
+double
+enum
+extern
+float
+inline
+int
+long
+register
+restrict
+short
+signed
+sizeof
+static
+struct
+typedef
+union
+unsigned
+virtual
+void
+volatile
+'
+
+for kw in ${kws}; do
+    hashin keywords ${kw} 1
+done
+
+# A rudimentary argument processing.
+argv=""
+target=""
+source=""
+while [ $# -gt 0 ]; do
+    case $1 in
+        -[cEMS])
+            if [ -n "${job}" ]; then
+                echo "Warning: $1 set, but job is already ${job}, ignoring" >&2
+            else
+                job="$1"
+            fi
+            ;;
+        -o)
+            shift
+            target="$1"
+            ! match '-*' "${target}" \
+                || die "Error: ${target} is not a valid argument to -o\nAborting compilation"
+            ;;
+        -o*)
+            target="${1#-o}"
+            ! match '-*' "${target}" \
+                || die "Error: ${target} is not a valid argument to -o\nAborting compilation"
+            ;;
+        -*)
+            argv="${argv} $1"
+            argv="${argv##[ ]}"
+            ;;
+        *[.][aX])
+            source="${source} $1"
+            source="${source##[ ]}"
+            ;;
+        *)
+            argv="${argv} $1"
+            argv="${argv##[ ]}"
+            ;;
+    esac
+    shift
+done
+
+# the ar executable is special because it expects the command as a
+# first argument
+ar () {
+    local bin="${AR%%[ ]*}"
+    if [ "${bin}" = "${AR}" ] ; then
+        command ${AR} $*
+        ret=$?
+        err="${AR} $*"
+    else
+        local args="${AR#*[ ]}"
+        local command="$1"
+        shift
+        command ${bin} ${command} ${args} $*
+        ret=$?
+        err="${bin} ${command} ${args} $*"
+    fi
+    return ${ret}
+}
+
+# regex patter for sole identifiers
+id='[a-zA-Z][a-zA-Z0-9_]*'
+idex='[a-zA-Z_][a-zA-Z0-9_]*'
+
+mangleStart="_ZN2_C"
+mangleEnd="E"
+
+# partially mangle a list of identifiers separated by '#'
+mangleID () {
+    local name=""
+    local IFS=" 	#"
+    for n in $* ; do
+        name="${name}${#n}${n}"
+    done
+    echo "${name}"
+}
+
+# completely mangle a composed identifier
+mangle () {
+    if [ "${1###}" = "$1" ]; then
+        echo "${mangleStart}$(mangleID $*)${mangleEnd}"
+    else
+        echo "${1###}"
+    fi
+}
+
+# completely mangle a composed identifier to an internal identifier
+mangleIntern () {
+    mangle "_Intern" $*
+}
+
+# regexpadd input string such that white space may occure arround '='
+# or '#'
+regexpadd () {
+    echo "$*" | ${SED} 's/[=#]/[ 	]*&[ 	]*/g'
+}
+
+# sort a list of words in decreasing order of size
+sizesort () {
+    local lines=""
+    for n in $* ; do
+        lines="${lines}${#n}:$n\n"
+    done
+    lines=$(echo "$lines" | ${SORT} -u | ${SORT} -n -r)
+    for pair in $lines ; do
+        echo "${pair#*:}"
+    done
+}
+
+findbin () {
+    local IFS=":"
+    local b="$1"
+    local a="${2:-${CMOD_A}}"
+    for d in ${CMOD_PATH} ; do
+        if [ -r "${d}/${b}${a}" ] ; then
+            echo "${d}/${b}${a}"
+            return
+        fi
+    done
+    echo "${CMOD_DIR}/${b}${a}"
+}
+
+modbin () {
+    local ret=""
+    for b in $* ; do
+        ret="${ret} $(findbin ${b})"
+    done
+    echo $ret
+}
+
+garbage=""
+cleanup () {
+    ${RM} -rf ${garbage}
+}
+
+abort () {
+    echo "exiting on signal ($?), cleaning up" >&2
+    cleanup
+}
+
+trap cleanup 0
+trap abort 1 2 3 4 6 7 8 11 13 15
+
+base=${source%/}
+base=${base##*/}
+base=${base%[.][a-zA-Z0-9]*}
+
+# we need some temporary
+tmpd=`mktemp -d "${TMP}/tmp.XXXXXXXXXXXXXXXX"`
+garbage="${garbage} ${tmpd} ${base}.o"
+jobid="${tmpd#*.}"
+tmpc="${tmpd}/${base}.c"
+tmph=${tmpc%[.]c}.h
+tmphd=${tmpc%[.]c}-def.h
+tmpo=${tmpc%[.]c}.o
+imph="${tmpd}/header.h"
+anot=${tmpc%[.]c}-anot.c
+
+report "this is job ${jobid}"
+
+modinfoext="-unique.txt -alias.txt -names.txt -links.txt -snippet.c .h"
+
+# Extract regrouped archives that are found in the environment
+# variable CMOD_ARCHIVES into the tmpd directory.
+for b in $(echo "${CMOD_ARCHIVES}" | ${SED} 's/:/ /g') ; do
+    f=$(realpath ${b})
+    report "extracting ${f}"
+    (cd ${tmpd} && ar x "${f}" 2>/dev/null >/dev/null ; true)
+done
+
+# Obtain a specific info file from a module.
+#
+# This uses the tmpd directory to extract all .a files, such that
+# repeated search don't have to repeat the extraction.
+modinfo () {
+    local n="$1"
+    local s="$2"
+    local f="${tmpd}/${n}${s}"
+    report "looking for ${f}"
+    if [ -r "${f}" ]; then
+        report "found ${f}"
+    else
+        report "looking for ${s} in ${n}"
+        local b="$(modbin ${n})"
+        local x=""
+        for e in ${modinfoext}; do
+            x="${x} ${n}${e}"
+        done
+        report "extracting ${x} from ${b}"
+        (cd ${tmpd} && ar x "${b}" "${x} || true" 2>/dev/null >/dev/null)
+        if [ -r "${f}" ]; then
+            report "now found ${f}"
+        else
+            report "extracting ${x} from ${b} failed"
+            f=
+            local memb="$(cd ${tmpd} && ar t "${b} " 2>/dev/null )"
+            for mem in ${memb}; do
+                if match "*${s}" "${mem}"; then
+                   report "maybe ${mem} is what we are looking for"
+                   f="${tmpd}/${mem}"
+                   (cd ${tmpd} && ar x "${b}" "${mem}"  2>/dev/null )
+                fi
+            done
+        fi
+    fi
+    echo "${f}"
+}
+
+# Recursively find all imports that are indirectly triggered by module
+# $1
+findimports () {
+    local m="$1"
+    local mangled=$(mangle "$m")
+    local bot="$(hashed bot ${mangled} 0)"
+    if [ "${bot}" -eq 0 ] ; then
+        hashin bot "${mangled}" 1
+        local uniq=$(modinfo "${m}" '-unique.txt')
+        if [ -n "${uniq}" ] ; then
+            ${CAT} ${uniq}
+        else
+            report "$(modbin ${m}) not found, aborting"
+            echo ""
+        fi
+    fi
+}
+
+# Import an identifier "ident" from module "m" with symbolic name "n"
+# into the module name space. Duplicates are detected and may result
+# in the abortion of the compilation.
+importname () {
+    report "importing $1 $2 $3"
+    local ident="$1"
+    local n="$2"
+    local m="$3"
+    local Ident
+    if [ -z "${n}" ] ; then
+        Ident="${ident}"
+    else
+        Ident="${n}#${ident}"
+    fi
+    local IdentM=$(mangle "${Ident}")
+    local previous=$(hashed _Ident "${IdentM}" "")
+    if [ -z "${previous}" ]; then
+        if [ -n "${n}" ]; then
+            hashin _Ident "${IdentM}" "${m}"
+            report "new name imported: ${Ident} -> ${m}"
+        else
+            hashin _Ident "${IdentM}" "${n}=${m}"
+            report "new name imported: ${Ident} -> ${n}=${m}"
+        fi
+    elif [ "${previous}" = "${m}" ]; then
+        report "Warning: duplicate definition of ${Ident} by import of ${n} and ${m}" >&2
+    elif [ "${previous}" = "${n}=${m}" ]; then
+        report "Warning: duplicate definition of ${Ident} by import of ${n}=${m}" >&2
+    elif [ "${Ident}" = "${previous#*=}" ]; then
+        report "Warning: duplicate definition of ${Ident} by import of ${n}=${m}" >&2
+    else
+        die "Error: redefinition of ${Ident} by import of ${n}=${m}, previously ${previous}\naborting compilation"
+    fi
+}
+
+# Find all local identifiers in a preprocessed source file. The idea is that
+# these are all identifiers that appear outside of any {}, (), [], or
+# comments. These we have to check against the keywords of C.
+#
+# In fact we don't detect identifiers with external linkage that are
+# placed inside (). These are detected later for the module
+# itself. For a snippet this such an identifier will be missed.
+
+findIDs () {
+    local file="$1"
+    shift
+    sizesort $(${SED} "
+/^[ 	]*[#][ 	]*include/d
+/^[ 	]*[#][ 	]*define[ 	]*INTERFACE/d
+s/^[ 	]*[#][ 	]*define[ 	]*\(${idex}\)(.*/ _XXXXXXXXFUNCTION_MACRO_\1 /1
+s/^[ 	]*[#][ 	]*define[ 	]*\(${idex}\)[ 	][ 	]*\([-+0-9A-Za-z][0-9A-Za-z]*[ 	]*\$\)/ _XXXXXXXXSIMPLE_MACRO_\1__VALUE_\2 /1
+s/^[ 	]*[#][ 	]*define[ 	]*\(${idex}\).*/ _XXXXXXXXOBJECT_MACRO_\1 /1
+"  "${file}"                          \
+                      | ${CPP} -x c - \
+                      | ${SED} "
+1 d
+/# [0-9][0-9]*/d
+:repeat
+
+# enum needs a special treatment: we want to capture the tag name and
+# the enumeration constants. Therefore remove the { and join lines
+# until we find a closing }.
+/enum\([^{}]*\){/{
+ # if there is an identifier, mark it as tag name
+ s/enum[ 	]*{/ /1
+ s/enum[ 	]*\([a-zA-Z0-9_]*\)[ 	]*{/ \1_ENUMERATION_TAG_XXXXXXXX /1
+ :inenum
+ /}/{
+  # anything that appears in the ``assignment'' part should be skipped
+  s/=[^,}]*[,}]/ /g
+  s/}/ /1
+  # mark remaining identifiers as constants
+  s/[a-zA-Z_][a-zA-Z0-9_]*/_XXXXXXXXENUMERATION_CONSTANT_&/g
+  b repeat
+ }
+ N
+ s/\n/ /g
+ b inenum
+}
+
+# find compound literals
+/\([^()]*\))[ 	]*[{][^{}][^{}]*[}]/{
+ s/(\([^()]*\))[ 	]*[{][^{}]*[}]/ /1
+ b repeat
+}
+
+# replace matching {}
+/{[^{}]*}/{
+ s/{[^{}]*}/ /g
+ b repeat
+}
+
+# replace () inside []
+/[\[]\([^[]()]*\)([^[]()]*)\([^[]()]*\)[\]]/{
+ s/[\[]\([^[]()]*\)([^[]()]*)\([^[]()]*\)[\]]/(\1 \2)/g
+ b repeat
+}
+
+# replace () inside other ()
+/[(]\([^(){}]*\)([^(){}]*)\([^(){}]*\)[)]/{
+ s/[(]\([^(){}]*\)([^(){}]*)\([^(){}]*\)[)]/(\1 \2)/g
+ b repeat
+}
+
+# find pointers to arrays
+/(\([^[](){}]*\))[ 	]*\[[^[](){}]*\]/{
+ s/(\([^[](){}]*\))[ 	]*\[[^[](){}]*\]/ \1 /g
+ b repeat
+}
+
+# find pointers to functions
+/\([^(){}]*\))[ 	]*[(][^(){}]*[)]/{
+ s/(\([^(){}]*\))[ 	]*[(][^(){}]*[)]/ \1 /g
+ b repeat
+}
+
+# replace matching ()
+/([^(){}]*)/{
+ s/([^(){}]*)/ /g
+ b repeat
+}
+
+# replace matching []
+/\[[^][{}]*\]/{
+ s/\[[^][{}]*\]/ /g
+ b repeat
+}
+
+# if we find and opening {([ on a line join lines until we find the
+# closing one
+/[{(\[]/{
+ N
+ s/\n//g
+ b repeat
+}
+
+# remove integer character constants
+s/[LUu]*'[^']'/ /g
+
+# remove strings. first we have to ensure that we don't mess up string
+# literals that contain special characters
+/\\[^\"]/{
+  s/\\[^\"]/ /1
+  b repeat
+}
+
+# now we are sure that any \\ that we find in front of a \" is not by
+# itself escaped, so we can remove such \\\"
+/\\\"/{
+  s/\\\"/ /1
+  b repeat
+}
+
+# the remaining strings don't contain special characters or escaped \"
+/\"[^\"]*\"/{
+  s/\([LUu]\|u8\)*\"[^\"]*\"/ /1
+  b repeat
+}
+
+# remove all other operators
+s@[-+.,;:|/<>=\*%^&!~]@ @g
+
+# replace simple integer constants that might be left over
+s/\<[0-9][0-9]*[uUlL]*/ /g
+s/^[ 	]*\$//1
+")
+}
+
+classifyIDs () {
+    local hnames=""
+    for word in $*; do
+        if ! match "${mangleStart}*${mangleEnd}" "${word}" \
+                && ! match '*#*' "${word}" ; then
+            #complain "looking for |${word}|"
+            if [ "$(hashed keywords ${word} 0)" = 0 ]; then
+                case "${word}" in
+                    (*_ENUMERATION_TAG_XXXXXXXX)
+                        word="${word%_ENUMERATION_TAG_XXXXXXXX}"
+                        word="${word#_XXXXXXXXENUMERATION_CONSTANT_}"
+                        hashadd what $(mangle ${modname} ${word}) "enumeration"
+                        ;;
+                    (_XXXXXXXXENUMERATION_CONSTANT_*)
+                        word="${word#_XXXXXXXXENUMERATION_CONSTANT_}"
+                        hashadd what $(mangle ${modname} ${word}) "enumerator"
+                        ;;
+                    (_XXXXXXXXFUNCTION_MACRO_*)
+                        word="${word#_XXXXXXXXFUNCTION_MACRO_*}"
+                        hashadd what $(mangle ${modname} ${word}) "function macro"
+                        ;;
+                    (_XXXXXXXXSIMPLE_MACRO_*)
+                        word="${word#_XXXXXXXXSIMPLE_MACRO_*}"
+                        value="${word#*__VALUE_}"
+                        word="${word%__VALUE_*}"
+                        hashadd what $(mangle ${modname} ${word}) "=${value}"
+                        ;;
+                    (_XXXXXXXXOBJECT_MACRO_*)
+                        word="${word#_XXXXXXXXOBJECT_MACRO_*}"
+                        hashadd what $(mangle ${modname} ${word}) "object macro"
+                        ;;
+                esac
+                if ! match "_[_A-Z]*" "${word}"; then
+                    hnames="${hnames} ${word}"
+                fi
+            fi
+        fi
+    done
+    echo ${hnames}
+}
+
+# regexp to capture pragma lines for this tool
+start='#pragma[ 	][ 	]*CMOD[ 	][ 	]*'
+
+# if the source is a .a file, we are used as a linker
+if match *[.]a "$source"; then
+    [ -z "${job}" ] \
+        || die "asking to compile archive file ${source} with option ${job}, aborting"
+    report "linking ${source}"
+    imps="$(findimports ${source%.a})"
+    report "detected imports: ${imps}"
+    as=""
+    for a in ${imps} ; do
+        m=$(mangle "$a")
+        ok=$(hashed link ${m} 0)
+        if [ "${ok}" -eq 0 ] ; then
+            link=$(modinfo ${a} '-links.txt')
+            if [ -z "${link}" ] ; then
+                complain "module $a not found"
+            else
+                link=$(${CAT} ${link})
+                for l in ${link}; do
+                    report "adding linker option ${l}"
+                    as="${as} ${l}"
+                done
+                if [ -r "$(modbin ${a})" ] ; then
+                    as="${a}${CMOD_A} ${as}"
+                fi
+                hashin link "${m}" 1
+            fi
+        fi
+    done
+    links=$(cd "${tmpd}" ; ls | ${SED} -n '/-links.txt$/ p')
+    links=$(cd "${tmpd}" ; cat ${links})
+    report "link order: ${as}"
+    #${CC} -o "${target:-${source%.a}}" ${source} "-Wl,--start-group" ${as} "-Wl,--end-group"
+    ${CC} -o "${target:-${source%.a}}" ${source} ${as} ${argv} ${links}
+    exit $?
+fi
+
+# this tool understands these different pragmas
+collectors="
+alias
+atexit
+at_quick_exit
+fill
+define
+defexp
+defreg
+entry
+import
+init
+link
+mimic
+module
+slot
+rename
+separator
+typedef
+snippet
+"
+keywords="${collectors}
+definition
+declaration
+"
+
+for keyword in ${keywords} ; do
+    eval "${keyword}='${start}${keyword}[ 	]*'"
+done
+
+separ=$(${SED} -n "
+/${separator}/{
+  s/${separator}\([^ 	][^ 	]*\)/\1/1
+  p
+  q
+}
+" "${source}")
+separ=${separ:=#}
+report "separator is ${separ}"
+
+# preprocess the source such that no spaces may surround # characters
+hashtag="(_HASHCHAR(${jobid}))"
+jointag="(_JOINTAG(${jobid}))"
+septag="(_SEPCHAR(${jobid}))"
+vatag="_VAARGS_${jobid}"
+vateg="_VAERGS_${jobid}"
+hashrep="(_HASHREP(${jobid}))"
+seprep="(_SEPREP(${jobid}))"
+psource="${tmpd}/psource.c"
+
+preprocess () {
+    local source="$1"
+    local target="$2"
+    shift 2
+${SED} ":again
+        / *# *include/s@include <\(std\)*\([^>]*\).h>.*@pragma CMOD import C${septag}std${septag}\2@1
+        /#/s@[#]@${hashtag}@g
+        # join consecutive lines that end with a \ character
+        /[\\]\$/ !b process
+        :line
+        /[\\]\$/{
+            s@[\\]\$@@1
+            N
+            b line
+        }
+        # end of loop
+        # mark the line as being joined
+        s@\n@@g
+        s@.*@&\n${jointag}@
+        # now process the new, long, line
+        # do the real processing
+        :process
+        /${separ}/s@${separ}@${septag}@g
+        s@\<__\(${idex}\)@${vatag}\1${vateg}@g
+        # if this was a long line we have to output the
+        # line number, but that is the number of the next line
+        /${jointag}\$/ {
+          n
+          =
+          # we already have read a new line
+          b again
+        }
+       " "${source}"      \
+    | ${CPP} $* '-D_HASHCHAR(X)=_HASHREP(X)' '-D_SEPCHAR(X)=_SEPREP(X)' - \
+    | ${SED} "
+              # perserve source line numbers that the prepro has marked
+              /^#/s@\"<stdin>\"@\"${source}\"@1
+              # mark long lines that we detected properly
+              /^${jointag}\$/{
+                N
+                s@^${jointag}[^0-9]*\([0-9]*\)@# \1 \"${source}\"@
+              }
+              /_HASH/{
+                        s@[[:space:]]*${hashrep}[[:space:]]*@#@g
+                        s@${hashtag}@#@g
+                       }
+              /_SEP/{
+                        s@[[:space:]]*${seprep}[[:space:]]*@${seprep}@g
+                        s@${idex}${seprep}\(${idex}${seprep}\)*${idex}@⟬&⟭@g
+                        s@${seprep}@#@g
+                        s@${septag}@${separ}@g
+                       }
+              s/${vatag}\(${idex}\)${vateg}/__\1/g
+              /\n/s@\n@@g
+           " > "${target}"
+}
+
+preprocess "${source}" "${psource}"
+preprocess "${source}" "${anot}" '-C'
+
+# Collect all the CMOD information that is spread out in the source
+# file. The lines that we collect must be protected such that space
+# token remain identifiable. Use a special character sequence to
+# encode a space token.
+STOKEN="_S${jobid}_"
+BTOKEN="_B${jobid}_"
+QTOKEN="_Q${jobid}_"
+ESCAPE="
+s@[ 	][ 	]*@${STOKEN}@g
+s@[\\]@${BTOKEN}@g
+s@[']@${QTOKEN}@g
+"
+UNESCA="
+s@${STOKEN}@ @g
+s@${BTOKEN}@"'\\'"@g
+s@${QTOKEN}@'@g
+"
+
+prerequisite () {
+    local slot="$1"
+    if match "*=*" "${slot}"; then
+        local m="$2"
+        local file="$3"
+        local nam="${slot%%=*}"
+        local full=$(mangle ${modname} "${nam}")
+        local repl="${slot#*=}"
+        repl=$(echo "${repl}" \
+                      | ${SED} "
+${UNESCA}
+s@^[ 	]*@@1
+")
+        case "${repl}" in
+            (typedef*)
+                repl="typedef ${nam} $(mangleIntern ${nam} in ${m} must be a type);"
+                ;;
+            (complete*)
+                repl="enum $(mangleIntern ${m} ${nam} enum) { $(mangleIntern ${nam} in ${m} must be a complete type) = sizeof (${nam}){ 0 }, };"
+                ;;
+            (ice*)
+                repl="enum $(mangleIntern ${m} ${nam} enum) { $(mangleIntern ${nam} in ${m} must be an integer constant expression) = (${nam}), };"
+                ;;
+            (extern*)
+                report "slot repl: ${nam} -> ${repl}"
+                repl="${repl#extern}"
+                repl="${repl#static}"
+                repl=$(echo "${repl}" | ${SED} "s@${nam}@(*)@g")
+                repl="enum $(mangleIntern ${m} ${nam} enum) { $(mangleIntern ${nam} in ${m} must be compatible) = sizeof (${repl}){ ${nam} }, };"
+                report "slot repl: ${nam} -> ${repl}"
+                ;;
+            (static*)
+                ;;
+            (none*)
+                return 0
+                ;;
+            (*)
+                repl="enum $(mangleIntern ${m} ${nam} enum) { $(mangleIntern ${nam} in ${m} must be compatible) = sizeof (${repl}){ ${nam} }, };"
+                ;;
+        esac
+        echo "${repl}" >>${file}
+    fi
+}
+
+# take out all CMOD special lines and handle them separately
+cmodcol="${tmpd}/cmodcol.txt"
+${SED} -n "
+/^${start}/ {
+ s@^${start}\(.*\)@\1@1
+ s@[ 	]*=[ 	]*@=@1
+ p
+}" "${psource}" >"${cmodcol}"
+
+for collector in ${collectors} ; do
+    coll=$(${SED} -n "
+/^${collector}/ {
+ s@^${collector}[ 	]*\(.*\)@\1@1
+ s@[ 	]*=[ 	]*@=@1
+ ${ESCAPE}
+ p
+}
+" ${cmodcol})
+    col=""
+    for p in ${coll} ; do
+        col="${col} ${p}"
+    done
+    hashin collectors "${collector}" "${col}"
+done
+
+checkcollector_ () {
+    local l=$1
+    local h=$2
+    shift 2
+    [ "$l" -le "$#" -a "$#" -le "$h" ]
+    return $?
+}
+
+checkcollector () {
+    local c=$1
+    shift
+    if ! checkcollector_ $* $(hashed collectors $c ""); then
+        echo "collector $c should appear between $* times"
+        abort
+    fi
+}
+
+checkcollector separator 0 1
+checkcollector module 0 1
+checkcollector snippet 0 1
+
+modules=$(hashed collectors module "")
+inits=$(hashed collectors init "")
+atexits=$(hashed collectors atexit "")
+at_quick_exits=$(hashed collectors at_quick_exit "")
+entries=$(echo $(hashed collectors entry "") | ${SED} "s/${STOKEN}//g; s/⟬//g; s/⟭//g;" )
+
+report "modules: ${modules}"
+modules=$(echo "${modules}" \
+                 | ${SED} "
+s/${STOKEN}//g
+s/⟬//g; s/⟭//g
+")
+report "modules: ${modules}"
+if match "*=*" "${modules}"; then
+    modtop="${modules%%=*}"
+else
+    modtop=""
+fi
+modname="${modules#*=}"
+modorig=$(splitjoin '#' "${separ}" "${modname}")
+
+if [ -n "$modname" ] ; then
+    report "compiling ${modname} with top name ${modtop}"
+else
+    modname="${base}"
+    report "module name set to ${modname}"
+fi
+modinst="$(mangleIntern ${modname} instantiation)"
+argv="${argv} -D__MODULE__=\"${modorig}\" -D__SEPARATOR__=\"${separ}\""
+
+imports=$(echo $(hashed collectors import "") | ${SED} "s/${STOKEN}//g; s/⟬//g; s/⟭//g;" )
+
+dsnip=""
+snipCount=0
+for imp in ${imports}; do
+    nam=${imp%%=*}
+    imp=${imp#*=}
+    snipf=$(modinfo "${imp}" '-snippet.c')
+    if [ -n "${snipf}" -a -s "${snipf}" ] ; then
+        if [ "$nam" != "${imp}" ] ; then
+            report "we want snippet for ${imp} with abbreviation ${nam}"
+        else
+            nam="_AnonymousSnippet_${snipCount}"
+            snipCount=$((${snipCount}+1))
+            report "${modname}: no abbreviation given for ${imp}, using ${nam}"
+        fi
+        hashin dsnip "$nam" "${imp}"
+        dsnip="${dsnip} ${nam}"
+    fi
+done
+
+if match "*#*" "${modname}"; then
+    imports="${modname%#*} ${imports}"
+fi
+
+includes=""
+for imp in ${imports}; do
+    nam="${imp#*=}"
+    includes="${includes}\n${nam}"
+    while match "*#*" "${nam}"; do
+        nam="${nam%#*}"
+        includes="${includes}\n${nam}"
+    done
+done
+
+includes=$(sizesort $includes)
+makedep () {
+    local makef="$1"
+    local target="$2"
+    local sourc=$(splitjoin '#' '\#' ${source})
+    if [ -n "$target" ]; then
+        echo "${target} : ${sourc}" >>"${makef}"
+    fi
+    targeta=$(modbin $(splitjoin "#" "\#" ${modname}))
+    targetd="${targeta%${CMOD_A}}${CMOD_D}"
+    report "target is $targeta ($modname)"
+    echo -n "${targeta} : ${targetd} ${sourc}" >>"${makef}"
+    deps=""
+    for imp in ${includes}; do
+        m="${imp#*=}"
+        m="$(modbin ${m})"
+        report "module ${imp} maybe in $m, looking for ${m%${CMOD_A}}${CMOD_X}"
+        if [ ! -e "${m%${CMOD_A}}${CMOD_X}" ] ; then
+            m="${imp#*=}"
+            m="${m%#*}"
+            m="$(modbin ${m})"
+            if [ -e "${m%${CMOD_A}}${CMOD_X}" ] ; then
+                report "replaced by $m"
+            else
+                m=""
+                report "no module of $imp found"
+            fi
+        fi
+        if [ -n "$m" ] ; then
+            m=$(splitjoin "#" "\#" "${m}")
+            d="${m%${CMOD_A}}${CMOD_D}"
+            deps="${deps} $d"
+            echo '		\\' >>"${makef}"
+            echo -n "	$m" >>"${makef}"
+        fi
+    done
+    echo >>"${makef}"
+}
+
+# we only are asked to produce a Makefile
+if [ "${job}" = "-M" ]; then
+    makef="${tmpd}/${modname}.d"
+    makedep "${makef}"
+    if [ -z "${target}" ]; then
+        ${CAT} "${makef}"
+    else
+        ${CP} -f "${makef}" "${target}"
+    fi
+    exit 0
+fi
+
+aliases=""
+for a in $(echo $(hashed collectors alias "") | ${SED} "s/${STOKEN}//g; s/⟬//g; s/⟭//g;"); do
+    loc="${a%%=*}"
+    al="${a#*=}"
+    if match "*#*" "${al}"; then
+        hashadd what "$(mangle ${modname} ${loc})" "+>${al}"
+        al=$(mangle "${al}")
+        hashin aliased "${loc}" "${al}"
+        hashadd what "${al}" "=${loc}"
+    fi
+    aliases="${aliases} ${loc}=${al}"
+done
+report "aliases: ${aliases}"
+renames=$(hashed collectors rename "")
+report "renames: ${renames}"
+
+# generate the "header" part of the file that is to be compiled. This
+# is mostly relevant for modules that mimic some parts of an external
+# library. In particular the interface for the C library uses this a
+# lot.
+
+echo "#if 1
+/* Ensure that inline functions are detected as extern symbols */
+#undef inline
+#define inline
+#include \"${tmph}\""    > "${tmpc}"
+
+mimics=$(hashed collectors mimic "")
+if [ ! -z "${mimics}" ] ; then
+    report "this module mimics ${mimics}"
+    echo "# 1 \"<${modname}>\"" >>${tmpc}
+    tmpm="${tmpd}/mimics.c"
+    for mimic in ${mimics} ; do
+        mimic=$(echo "$mimic" | ${SED} "s/${STOKEN}/ /g")
+        if ! match '[\<\"]*' "${mimic}" ; then
+            def="${mimic%%,*}"
+            mimic="${mimic#*,}"
+            echo "#if ${def}\n# include ${mimic}\n#endif" >>${tmpm}
+        else
+            echo "#include ${mimic}" >>${tmpm}
+        fi
+    done
+    defines=$(hashed collectors define "")
+    defregs=$(echo $(hashed collectors defreg "") | ${SED} "${UNESCA}" )
+    if [ ! -z "${defregs}" ] ; then
+        for defreg in $defregs ; do
+            mac=${defreg#*=}
+            nam=${defreg%%=*}
+            def=$(${CPP} -dM "${tmpm}" ${argv} 2>&1                           \
+                  | ${SED} -n "/#define \(${mac}\)\>/{
+                            s/#define //1
+                            s/^${mac}\>.*/${nam}=\1 /1
+                            p
+                         }
+                         ")
+            if [ -n "${def}" ] ; then
+                defines="${defines} ${def}"
+            fi
+        done
+    fi
+    if [ ! -z "${defines}" ] ; then
+        # We escape special identifiers inside macro expansions.
+        # These are all identifiers that start and end in a double
+        # underscore, such as __FILE__, __LINE__, __func__,
+        # __VA_ARGS__ and also any occurence of a # character is
+        # protected.
+        spectag="_SPECIAL_${jobid}"
+        defitag="_DEFINE_${jobid}_"
+        pat="_RANDOM_${jobid}"
+        sub=""
+        for define in $defines ; do
+            mac=${define#*=}
+            nam=${define%%=*}
+            pat="${pat}\|${mac}"
+            hashadd what $(mangle ${modname} ${nam}) "inherited"
+            if [ "${nam}" != "${mac}" ] ; then
+                sub="${sub}
+                     s/${defitag}${mac}/${defitag}${nam}/1"
+            fi
+        done
+        specials="__[a-zA-Z0-9_]*__"
+        echo "# 1 \"<${modname} defines>\"" >>${tmpc}
+        echo "#pragma CMOD declaration" >>${tmpc}
+        ${CPP} -dM ${tmpm} ${argv} 2>&1                           \
+            | ${SED} -n "/#define \(${pat}\)\>/{
+                            s/#define \(${pat}\)/${defitag}\1/1
+                            ${sub}
+                            s/\<\(${specials}\)\>/${spectag}&/g
+                            s/#/${hashtag}/g
+                            p
+                         }
+                         "                                          \
+            | ${CPP} - ${argv}                                      \
+            | ${SED} -n "/${defitag}/{
+                            s/${defitag}/#define /1
+                            s/\<${spectag}\(${specials}\)\>/\1/g
+                            s/${hashtag}/#/g
+                            p
+                          }
+                        "                                           \
+                  >>${tmpc}
+        echo "#pragma CMOD definition" >>${tmpc}
+    fi
+    typedefs=$(hashed collectors typedef "")
+    if [ ! -z "${typedefs}" ] ; then
+        pat="_RANDOM_${jobid}"
+        sub=""
+        typstart='[ ]*typedef[^\n]*'
+        typend='[^\n;]*;'
+        for typedef in $typedefs ; do
+            typ=${typedef#*=}
+            nam=${typedef%%=*}
+            pat="${pat}\|${typ}"
+            if [ "${nam}" != "${typ}" ] ; then
+                sub="${sub}
+                     s/^\(${typstart}\)\<${typ}\>\(${typend}\)/\1${nam}\2/1"
+            fi
+            hashadd what "$(mangle ${modname} ${nam})" "type;=${typ}"
+            lnames="${lnames} ${nam}"
+        done
+        echo "# 1 \"<${modname} typedefs>\"" >>${tmpc}
+        echo "#pragma CMOD declaration" >>${tmpc}
+        ${CPP} ${tmpm} ${argv} \
+            | ${SED} -n "
+                         /^\(${typstart}\)\(${pat}\)\(${typend}\)/{
+                           !d
+                           ${sub}
+                           p
+                         }
+                        " >>${tmpc}
+        echo "#pragma CMOD definition" >>${tmpc}
+    fi
+    defexps=$(hashed collectors defexp "" | ${SED} "s/'/QOOOT/g")
+    if [ ! -z "${defexps}" ] ; then
+        typstart='[ ]*defexp[^\n]*'
+        typend='[^\n;]*;'
+        echo "
+#include <stdio.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <locale.h>
+#define cmod_printf(F, ...) printf(F \""'\\'"n\", __VA_ARGS__)
+typedef signed char _sc;
+typedef unsigned char _uc;
+typedef unsigned short _us;
+typedef unsigned long _ul;
+typedef unsigned long long _ull;
+typedef signed long _sl;
+typedef signed long long _sll;
+typedef long double _ld;
+/* A type generic expression to produce defines that */
+/* detects if X is an integer constant expression.   */
+#define ICE(X, Y, N) _Generic((1 ? (double*)0 : (void*)((X)-(X))), double*: (Y) , default: (N))
+/* Return the integer rank of an expression. */
+#define RANK(X) (size_t)_Generic((X) , _Bool: 0, unsigned char: 1, unsigned short: 2, unsigned: 3, unsigned long: 4, unsigned long long: 5, signed char: 1, signed short: 2, signed: 3, signed long: 4, signed long long: 5, char: 1, default: 6)
+size_t msb(uintmax_t a) {
+  size_t ret = 0;
+  while (a) {
+    ++ret;
+    a >>= 1;
+  }
+  return ret;
+}
+/* A type generic expression to produce defines that */
+/* have the same type as the original expression.    */
+#define cmod_frmt(X) _Generic((X),                        \
+   char*: \"#define %s "'\\'"\"%s"'\\'"\""'\\'"n\",       \
+   char const*: \"#define %s "'\\'"\"%s"'\\'"\""'\\'"n\", \
+   _Bool: \"#define %s ((_Bool)%+d)"'\\'"n\",             \
+   char: \"#define %s '%c'"'\\'"n\",                      \
+   signed char: \"#define %s ((_sc)%+hhd)"'\\'"n\",       \
+   unsigned char: \"#define %s ((_uc)(%hhu+0U))"'\\'"n\", \
+   short: \"#define %s ((short)%+hd)"'\\'"n\",            \
+   unsigned short: \"#define %s ((_us)(%hu+0U))"'\\'"n\", \
+   int: \"#define %s %d"'\\'"n\",                         \
+   long: \"#define %s %ldL"'\\'"n\",                      \
+   long long: \"#define %s %lldLL"'\\'"n\",               \
+   unsigned int: \"#define %s %uU"'\\'"n\",               \
+   unsigned long: \"#define %s %luUL"'\\'"n\",            \
+   unsigned long long: \"#define %s %lluULL"'\\'"n\",     \
+   float: \"#define %s %aF"'\\'"n\",                      \
+   double: \"#define %s %a"'\\'"n\",                      \
+   long double: \"#define %s %LaL"'\\'"n\"                \
+)
+#ifndef __GCC_HAVE_SYNC_COMPARE_AND_SWAP_1
+# define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_1 0
+#endif
+#ifndef __GCC_HAVE_SYNC_COMPARE_AND_SWAP_2
+# define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_2 0
+#endif
+#ifndef __GCC_HAVE_SYNC_COMPARE_AND_SWAP_4
+# define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_4 0
+#endif
+#ifndef __GCC_HAVE_SYNC_COMPARE_AND_SWAP_8
+# define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_8 0
+#endif
+#ifndef __GCC_HAVE_SYNC_COMPARE_AND_SWAP_16
+# define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_16 0
+#endif
+int main(void) {
+    setlocale(LC_ALL, \"\");" >>${tmpm}
+        for defexp in $defexps ; do
+            exp=${defexp#*=}
+            nam=${defexp%%=*}
+            hashadd what $(mangle ${modname} ${nam}) "evaluated"
+            if [ "${exp}" != "${exp#\"}" ]; then
+                echo "	cmod_printf(${exp});" >>${tmpm}
+            elif [ "${exp}" != "${exp#\#}" ]; then
+                mac="${exp#\#}"
+                if match '*,*' "${mac}"; then
+                    exp="${mac#*,}"
+                    mac="${mac%%,*}"
+                else
+                    exp="${mac}"
+                fi
+                echo "
+#ifdef ${mac}
+  {
+    char* loc=setlocale(LC_ALL, \"C\");
+    printf(cmod_frmt(${exp}), \"${nam}\", ${exp});
+    setlocale(LC_ALL, loc);
+  }
+#endif
+" >>${tmpm}
+            else
+                echo "
+  {
+    char* loc=setlocale(LC_ALL, \"C\");
+    printf(cmod_frmt(${exp}), \"${nam}\", ${exp});
+    setlocale(LC_ALL, loc);
+  }
+" >>${tmpm}
+            fi
+        done
+        echo "	return 0;" >>${tmpm}
+        echo "}" >>${tmpm}
+        ${SED} "${UNESCA}" ${tmpm} | ${CC} -o ${tmpo} -x c - ${argv} -lc -lm
+        echo "# 1 \"<${modname} defexp>\"" >>${tmpc}
+        echo "#pragma CMOD declaration" >>${tmpc}
+        ${tmpo} >> ${tmpc}
+        echo "#pragma CMOD definition" >>${tmpc}
+    fi
+fi
+
+echo "#pragma CMOD declaration"            >>${tmpc}
+echo "#define MODULE_PREFIX(...) ${mangleStart}$(mangleID ${modname})##__VA_ARGS__"   >> ${tmpc}
+echo "#pragma CMOD definition"       >>${tmpc}
+
+# Now replace declaration and definition lines, first in the header
+# part that we produced and then in the source. We have to watch
+# carefully that the line information stays intact such that compilers
+# and debuggers later point to the correct source line.
+
+skript=":again
+/^${start}/ {
+  s|^${module}\(.*\)|/* was module directive */|
+  $ {
+      /^${declaration}.*/{
+        s|^${declaration}.*|\#endif\n\#if INTERFACE|
+        p
+      }
+      /^${definition}/{
+        s|^${definition}.*|#endif\n#if 1|
+        p
+      }
+    }
+  /^${declaration}.*/{
+      s|^${declaration}.*|\#endif\n\#if INTERFACE\n${jointag}|
+      n
+      =
+      b again
+  }
+  /^${definition}/{
+      s|^${definition}.*|#endif\n#if 1\n${jointag}|
+      n
+      =
+      b again
+  }
+  /^${snippet}/{
+      s|^${snippet}.*|#endif\n______SNIPPET_____\n#if 1\n${jointag}|
+      n
+      =
+      b again
+  }
+}"
+
+rscripth="
+/^${start}/s@[^\n]*@@
+/^${jointag}\$/{
+ N
+ /\n/{
+   !d
+   s@\n@@
+ }
+ s@${jointag}[^0-9]*\([0-9]*\)@# \1 \"<${modname} header>\"@
+}
+"
+
+rscripts="
+/^${start}/s@[^\n]*@@
+/^${jointag}\$/{
+ N
+ /\n/{
+   !d
+   s@\n@@
+ }
+ s@${jointag}[^0-9]*\([0-9]*\)@# \1 \"${source}\"@
+}
+"
+
+${SED} -i -e "${skript}" ${tmpc}
+${SED} -i -e "${rscripth}" ${tmpc}
+
+${SED} -e "
+            1 s@[\n]*@# 1 \"${source}\"\n&@1
+            ${skript}
+          " "${psource}"                             \
+    | ${SED} -e "${rscripts}"  >>${tmpc}
+
+report "importing: ${includes}"
+
+cmangle="_CMANGLE_${jobid}"
+prepro="-D${cmangle}(X)=X"
+modmang=$(mangle "${modname}")
+if [ -z "${modtop}" ]; then
+    repls=""
+else
+    hashin subst "$(mangle ${modtop})" "${modname}"
+    repls="${modtop}"
+    # prepro="${prepro} -D${modtop}=$(mangle ${modname})"
+    hashin what "$(mangle ${modname} ${modtop})" "->${modname}"
+    lnames="${lnames} ${modtop}"
+fi
+imps=""
+toinit=""
+snip="${tmpd}/snip.c"
+touch ${snip}
+for pair in ${imports} ${includes} ; do
+    m="${pair}"
+    n="${m}"
+    if match '*=*' "${pair}"; then
+        m="${pair#*=}"
+        n="${pair%%=*}"
+        report "replacing prefix $n by $m"
+    fi
+    mangled=$(mangle "$m")
+    hashin subst "$(mangle ${n})" "${m}"
+    repls="${repls} $n"
+    seen=$(hashed seen "${mangled}" 0)
+    if [ ${seen} -eq 0 ] ; then
+        # only mark a module for the init machinerie if it has an init
+        # TU by itself
+        hashin seen "${mangled}" 1
+        inito=$(modinfo "${m}" '-init.o')
+        if [ -n "${inito}" ]; then
+            toinit="${toinit} ${m}"
+        fi
+        for im in $(findimports ${m}) ${m} ; do
+            imm=$(mangle ${im})
+            if [ "$(hashed imps ${imm} 0)" = "0" ] ; then
+                hashin imps ${imm} "1"
+                imps="${imps} ${im}"
+            fi
+        done
+    fi
+done
+report "imps: $imps"
+
+tmpsnip="${tmpd}/tmpsnip.c"
+touch "${tmpsnip}"
+snippets=$(hashed collectors snippet "")
+if [ -n "${snippets}" ]; then
+    ${SED} -i "/______SNIPPET_____/,\$ {
+              w ${tmpsnip}
+              d
+           }" ${tmpc}
+else
+    echo "#endif\n#if 1" >>${tmpc}
+fi
+
+replaceID () {
+    if  match "*#*#*" "${1}"; then
+        echo -n "${1}"
+    else
+        local prefix="${1%%#*}"
+        prefix=$(hashed subst "$(mangle $prefix)" "${prefix}")
+        if  match "*#*" "${1}"; then
+            echo -n "${prefix}#${1#*#}"
+        else
+            echo -n "${prefix}"
+        fi
+    fi
+}
+
+for fill in $(hashed collectors fill "" | ${SED} 's/⟬//g; s/⟭//g;'); do
+    m="${fill#*=}"
+    n="${fill%%=*}"
+    ab="${n%#*}"
+    lo="${n##*#}"
+    report "fill: ${n} by ${m} -> ${ab} name ${lo}"
+    hashadd fillabbrevs "${ab}" "${n}"
+    repl=$(replaceID "${m}")
+    if match "*#*" "${repl}" ; then
+        replm=$(mangle "${repl}")
+    else
+        replm=$(mangle "${modname}" "${repl}")
+        hashin subst "$(mangle ${m})" "${modname}#${m}"
+        repls="${repls} ${m}"
+        report "fill ${n} results in definition of local name ${m}"
+    fi
+    hashin fillrepl "$(mangle ${n})" "${replm}"
+done
+for n in ${dsnip} ; do
+    m=$(hashed dsnip "${n}" "<unknown>")
+    report "found snippets: ${n}, ${m}"
+    mangled=$(mangle "$m")
+    report "adding snippet $n for $m"
+    snipf=$(modinfo "${m}" '-snippet.c')
+    if [ -n "${snipf}" -a -s "${snipf}" ]; then
+        lines="$(wc -l ${snipf})"
+        lines="${lines%% *}"
+        if [ -z "${modtop}" ]; then
+            fillrepl="s/\<_Importer#\(${idex}\)/⟬${modname}#\1⟭/g
+                      s/\<_Importer\>/⟬${modname}⟭/g"
+        else
+            fillrepl="s/\<_Importer#\(${idex}\)/⟬${modtop}#\1⟭/g
+                      s/\<_Importer\>/⟬${modtop}⟭/g"
+        fi
+        fills=$(hashed fillabbrevs "${n}" | ${SED} 's/;/ /g')
+        echo "/* import '$n' replaces ${fills} */"          >>"${tmpc}"
+        for fill in ${fills} ; do
+            fillx="$(replaceID ${fill})"
+            fillm="$(mangle ${fillx})"
+            replm=$(hashed fillrepl "$(mangle ${fill})" "")
+            report "fill pattern ${fillm} (${fillx}) -> ${replm}"
+            echo "/* ${fill} -> ${replm} */"                 >>"${tmpc}"
+            fillrepl="${fillrepl}
+                      s/\<${fillm}\>/⟬${replm}⟭/g"
+        done
+        report "fillrepl: ${fillrepl}"
+        ${SED} "${fillrepl}" "${snipf}"                      >>"$tmpc"
+        hashadd what "$(mangle ${modname} ${n})" "+${lines}"
+    fi
+    sids=$(modinfo "${m}" '-snames.txt')
+    if [ -n "${sids}" ] ; then
+        sids=$(${CAT} "${sids}")
+        for ident in ${sids} ; do
+            hashadd what "$(mangle ${modname} ${ident})" "<-${m}"
+        done
+    fi
+done
+
+# Reorganize the symbols that are to be replace in descending order of
+# size. This ensures that we will not accidentally replace a
+# subpattern before a bigger one.
+repls=$(sizesort ${repls})
+
+# replace every symbolic import module name prefix by the mangle
+sedid=""
+sedidid=""
+for n in ${repls} ; do
+    m=$(hashed subst "$(mangle $n)" "")
+    mangled="${mangleStart}$(mangleID ${m})"
+    esc=$(splitjoin '#' "=" ${m})
+    report "esc: ${esc} ($n, $m)"
+    sedid="${sedid}
+           s|⟬${n}#\(${idex}\)⟭|#⟬${esc}=\1⟭|g"
+    if [ "$n" != "$m" ]; then
+        if ! match "*#*" "${n}"; then
+            prepro="${prepro} -D${n}=$(mangle ${m})"
+        else
+            sedidid="${sedidid}
+                     s|⟬${n}⟭|#⟬${esc}⟭|g"
+        fi
+    fi
+    if [ "${n}" != "${modtop}" ]; then
+        lids=$(modinfo ${m} '-names.txt')
+        if [ -n "${lids}" ] ; then
+            lids=$(${CAT} "${lids}")
+            for ident in ${lids} ; do
+                importname "${ident}" "${n}" "${m}"
+            done
+        fi
+    fi
+    importname "${n}" "" "${m}"
+done
+report "sedid: ${sedid}"
+report "sedidid: ${sedidid}"
+report "prepro: ${prepro}"
+
+snippet="${tmpd}/${modname}-snippet.c"
+touch ${snippet}
+
+if [ -n "${snippets}" ]; then
+    snipcheck="${tmpd}/snipcheck.h"
+    echo "# 1 \"${modname} slots\"" > ${snipcheck}
+    snipro=""
+    m="$(mangle ${modname})"
+    if match "*=*" "${snippets}"; then
+        nam="${snippets%%=*}"
+        hashadd what "$(mangle ${modname} ${nam})" "->${nam}"
+        lnames="${lnames} ${nam}"
+        snipro="$snipro -D${nam}=_Importer"
+    # else
+    #     hashadd what "$m" "->importer"
+    fi
+    for slot in $(hashed collectors slot ""); do
+        match '*=*' "${slot}" \
+            || die "slot directive must be of the form \"IMP${separ}SLOT = SPECIFICATION\". Found just \"${slot}\""
+        nam="${slot%%=*}"
+        m="$(mangle ${modname} ${nam})"
+        prerequisite "${slot}" "${modname}" "${snipcheck}"
+        snipro="$snipro -D${nam}=$m"
+        hashadd what "$(mangle ${modname} ${nam})" "->${nam}"
+        lnames="${lnames} ${nam}"
+        ${CAT} <<SLOT >>"${snippet}"
+/* snippet of ${modname} requires slot ${nam} */
+#define ${m} slot ${nam}_is_missing
+SLOT
+    done
+    report "local slots: ${lnames}"
+    ${SED} "
+             1 {
+               r ${snipcheck}
+             }
+            " "${tmpsnip}" >>"${tmpc}"
+fi
+
+assertpre='CMOD_static_assert_'
+${SED} -i "s/${assertpre}\(${idex}\)/_STATIC_ASSERT_NAME(__LINE__, ${modmang}\1)/g" ${tmpc}
+
+echo "#endif"            >>${tmpc}
+
+# Mangle identifiers.  This is probably far too complicated, but seems
+# to do the job. The problem is that we don't want to mangle
+# identifiers that are embedded in strings. The way we have chose to
+# ensure this here, is to first mark and mangle everything, run the
+# preprocessor, and then look which marks remained to demangle.
+comline="_COMLINE_${jobid}"
+hashit="_HASHIT_${jobid}"
+emptit="_EMPTIT_${jobid}"
+hashf="${tmpd}/hashed.c"
+    ${SED} "
+            s|[/][/]\(.*\)|${comline}\1|g
+            s/\<__\(${idex}\)/${vatag}\1${vateg}/g
+            s/^#/${hashit}/
+            s/^[ ]*\$/${emptit}/
+            ${sedid}
+            ${sedidid}" ${tmpc} > ${hashf}
+    longnames=$(${SED} 'y/ 	/\n\n/'  ${hashf}             \
+               |${SED} -n  "
+              /#⟬/{
+                !d
+                s|[^#]*#⟬\([_a-zA-Z0-9=]*\)⟭[^#]*|####{\1}|g
+                s|#[^#{}]*||g
+                s|####{\([^{}]*\)}|\1 |g
+                s|{\([^{}]*\)}|\1 |g
+                s|[^a-zA-Z0-9_= ][a-zA-Z0-9_=]*||g
+                p
+              }
+             ")
+    longnames=$(sizesort "${longnames}")
+    report "longnames: ${longnames}"
+    mangnames=""
+    reverse=""
+    for longn in $(sizesort ${longnames}); do
+        if match "${mangleStart}*" "${longn}"; then
+            dem=$(hashed demangle "${longn}" "not hashed")
+            echo "encountered: ${longn}, ${dem}"
+        else
+            n=$(splitjoin '=' '#' "${longn}")
+            m=$(mangle ${n})
+            report "demangle: |${longn}|$m|$n|"
+            hashin demangle "$m" "${n}"
+            mangnames="${mangnames}
+                       s|#⟬${longn}⟭|${cmangle}(${m})|g"
+            reverse="${reverse}
+                     s|${cmangle}(${m})|${n}|g"
+        fi
+    done
+    report "prepro: ${prepro}"
+    # makeheader doesn't deal well with _Static_assert in file scope
+    ${SED} "$mangnames" ${hashf}                                                                                  \
+        | ${CPP} "-D${cmangle}(X)=X"                                                                               \
+                "-D_STATIC_ASSERT_NAME_(L,R)=${assertpre}${jobid}_ ## L ## R"                                            \
+                "-D_STATIC_ASSERT_NAME(L,R)=_STATIC_ASSERT_NAME_(L,R)"                                                \
+                "-D_STATIC_ASSERT(X, LOG)=inline void _STATIC_ASSERT_NAME(__LINE__,${modmang})(){ _Static_assert(X, LOG); return;return;}" \
+                ${prepro} - \
+        | ${SED} "
+            /^#/d
+            s|${hashit}|#|
+            s|${comline}\(.*\)|//\1|g
+            s|${vatag}\(${idex}\)${vateg}|__\1|g
+            s|^${emptit}\$||
+            ${reverse}
+          " > ${tmpc}
+
+# separate the snippet if there is some
+if [ -n "${snippets}" ]; then
+    ${SED} -i "/______SNIPPET_____/,\$ {
+              s/______SNIPPET_____//
+              w ${snippet}
+              d
+           }" ${tmpc}
+fi
+
+${SED} -i 's/⟬//g; s/⟭//g;' ${tmpc}
+
+# This produces "tmph"
+${MAKEHEADERS} ${tmpc}
+
+# static asserts are now encapsulated in inline functions to fool
+# makeheaders. Unpack them to avoid the creating of such dummy
+# functions.
+static_assert_undo="s/[a-zA-Z0-9_ ]*${assertpre}[a-zA-Z0-9_]*(){ \(.*\) return;return;}/\1/1"
+${SED} -i "${static_assert_undo}" ${tmph}
+
+hnames=$(classifyIDs $(findIDs "${tmph}"))
+
+if [ -s "${snippet}" ]; then
+    ${MAKEHEADERS} "${snippet}"
+    ${SED} -i "${static_assert_undo}" "${snippet%.c}.h"
+    snames=$(classifyIDs $(findIDs "${snippet%.c}.h"))
+else
+    report "no snippet in ${modname}"
+fi
+
+unique=""
+echo "# 1 \"${modname} imports\"" > "${imph}"
+for m in ${imps} ; do
+    mangled=$(mangle "$m")
+    ok=$(hashed ok "${mangled}" 0)
+    subst=$(regexpadd "$pair")
+    if [ "${ok}" -eq 0 ] ; then
+        report "importing ${m}"
+        unique="${unique} ${m}"
+        hfile=$(modinfo "${m}" .h)
+        if [ -n "${hfile}" ] ; then
+            ${SED} -i "s/${assertpre}\(${idex}\)/&${mangled}/g" "${hfile}"
+            echo "#include \"${hfile}\"" >> ${imph}
+        fi
+        laliass=$(modinfo ${m} '-alias.txt')
+        if [ -n "${laliass}" ] ; then
+            laliass=$(${CAT} "${laliass}")
+            for a in ${laliass} ; do
+                n=${a%%=*}
+                a=${a##*=}
+                impalias="${impalias} $(mangle ${m} ${n})=${a}"
+            done
+        fi
+        hashin ok "${mangled}" 1
+    fi
+done
+for init in ${inits} ; do
+    echo "extern void ${init}(void);"               >>${imph}
+done
+for atexit in ${atexits} ; do
+    echo "extern void ${atexit}(void);"             >>${imph}
+done
+for at_quick_exit in ${at_quick_exits} ; do
+    echo "extern void ${at_quick_exit}(void);"      >>${imph}
+done
+
+${SED} -i "1 s/.*/# 1 \"${modname} header\"\n#define ${modinst} 0\n&/1" ${tmph}
+
+${SED} -i "1 r ${imph}" ${tmpc}
+
+# add all defines
+defpat='^[ 	]*#[ 	]*define[ 	]*'
+ndefines=$(${SED} -n "/${defpat}/{ s/${defpat}\(${idex}\)[^\n]*/\1/ ; p }" ${tmph})
+for d in ${ndefines} ; do
+    if [ ${d} != "INTERFACE" ] ; then
+        names="$names $d"
+        if match "${mangleStart}*${mangleEnd}" "${d}" ; then
+            hashadd what "${d}" "macro"
+        else
+            hashadd what $(mangle ${modname} ${d})  "macro"
+        fi
+    fi
+done
+
+# add all tag names
+tagpat="^[ 	]*typedef[ 	][^\n][^\n]*\<\($idex\)\>[ 	]*;[ 	]*\$"
+for tag in $(${SED} -n "/${tagpat}/{ s/${tagpat}/\1/ ; p }" ${tmph}); do
+    tags="${tags} ${tag}"
+done
+tags="$(sizesort ${tags})"
+report "tag names: ${tags}"
+
+for t in ${tags} ; do
+    if match "${mangleStart}*${mangleEnd}" "${t}" ; then
+        hashadd what "${t}" "type"
+    else
+        hashadd what $(mangle ${modname} ${t}) "type"
+    fi
+done
+for a in ${aliases} ; do
+    n="${a%%=*}"
+    t="${a#*=}"
+    if ! match "*#*" "$t"; then
+        hashadd what $(mangle ${modname} ${n})  "=$t"
+    fi
+done
+for s in ${snames} ; do
+    hashadd what $(mangle ${modname} ${s})  "->${s}"
+done
+
+names="${names} ${hnames} ${tags} ${aliases} ${renames} ${defexpnames} ${defines} ${typedefs}"
+
+report "names: ${names}"
+# some mangled names may already have sneaked in, in particular the
+# one for the modtop
+nnames=""
+for n in ${names}; do
+    if match "${mangleStart}*${mangleEnd}" "${n}" ; then
+        report "found ${n} in names"
+        #hashadd what "${n}" "mangled"
+    else
+        name=${n%%=*}
+        if [ "${name}" != "${modtop}" ]; then
+            nnames="${nnames} ${n}"
+        else
+            hashadd what $(mangle ${modname}) "modtop"
+        fi
+    fi
+done
+names="${nnames}"
+report "names: ${names}"
+
+dotprefix="_DOT_${jobid}"
+process () {
+    local file="$1"
+    shift
+    ${SED} "
+            s@\([-+=~!#%^&*(){}\[\]|;:,<.>?/]\)__@\1 __@g
+            s|\<__\(${idex}\)|${vatag}\1${vateg}|g
+            s|#|${hashit}|g
+            s|[.][ 	]*|${dotprefix}|g
+           " "${file}"                             \
+        | ${CPP} -C $* -                            \
+        | ${SED} "
+                  /^#/d
+                  s|${hashit}|#|g
+                  s|${dotprefix}|.|g
+                  s|${vatag}\(${idex}\)${vateg}|__\1|g
+                  " >"${file}-bak"
+    ${MV} -f "${file}-bak" "${file}"
+}
+
+# first ensure that the module base name is not mangled within
+prepro=""
+for n in $names ; do
+    a=${n%%=*}
+    m="$(mangle ${modname} $a)"
+    prepro="$prepro -D$a=$m"
+done
+
+if [ -s "${snippet}" ] ; then
+    process ${snippet} ${snipro}
+fi
+process ${tmph} ${prepro}
+process ${tmpc} ${prepro}
+process ${anot} ${prepro}
+nsstart=$(splitjoin '#' '{\\n namespace ' "${modname}")
+nsend="/*"$(splitjoin '#' '*/ } /* ' "${modname}")"*/"
+hname=$(splitjoin '#' ':' ${modname})
+${SED} -i "
+           s|.*pragma CMOD module .*=\(.*\)|namespace ${nsstart} /** @brief A C module */ {|1
+           s|.*pragma CMOD module \(.*\)|/** @brief C module */namespace ${nsstart} /** @brief A C module */ { |1
+           #s|.*pragma CMOD alias \(.*\).*=\(.*\)| /** @property \1 \n  ** @brief an alias for ::\2 **/|1
+           #s|.*pragma CMOD alias \(.*\)| /** @property \1 \n  ** @brief an alias for ::\1 **/|1
+           s|.*pragma CMOD typedef \(.*\).*=\(.*\)|typedef ::\2 \1;|1
+           s|.*pragma CMOD typedef \(.*\)|typedef ::\1 \1;|1
+           s|.*pragma CMOD define \(.*\).*=\(.*\)|#define \1 \2|1
+           s|.*pragma CMOD define \(.*\)|#define \1 ::\1|1
+           s|.*pragma CMOD defexp \(.*\).*=\(.*\)|#define \1 \2|1
+           s|.*pragma CMOD defexp \(.*\)|#define \1 ::\1|1
+           s/.*pragma CMOD import \(.*\).*=\(.*\)/namespace \1 = \2;/1
+           s/.*pragma CMOD import \(.*\)/using \1;/1
+           s|⟬\([a-zA-Z_0-9#]*\)⟭|\1|g
+           :redo
+           /\(${idex}\)#\(${idex}\)/{
+             s/\(${idex}\)#\(${idex}\)/\1::\2/1
+             b redo
+           }
+           s/${separ}/#/g
+" ${anot}
+echo "}${nsend}" >>"${anot}"
+
+if match -[ES] "${job}"; then
+    if [ -n "${target}" ] ; then
+        outarg="-o ${target}"
+    else
+        if [ "${job}" = "-S" ] ; then
+            outarg="-o ${base}.s"
+        fi
+    fi
+    ${CC} ${outarg} ${tmpc} ${job} ${argv}
+    exit $?
+fi
+
+echo "unsigned long long const volatile (*__MODULE_ABI)[] = &$(mangle C MODULE_ABI);"   >> ${tmpc}
+echo "unsigned long long const volatile (*__MODULE_FEATURES) = &$(mangle C MODULE_FEATURES);"   >> ${tmpc}
+objopts="${objopts} --localize-symbol=__MODULE_ABI --localize-symbol=__MODULE_FEATURES"
+
+# generate the preprocessor extract
+${SED} -n "/^#/ {
+           w ${tmphd}
+       }" ${tmph}
+# generate the declaration extract
+${SED} -i "/^#define/ {
+           s/.*//1
+       }" ${tmph}
+# generate forward declarations for all union and struct
+${SED} -n "/.*\(union\|struct\)[ ]*\(${idex}\).*/ {
+                     s/.*\(union\|struct\)[ ]*\(${idex}\).*/typedef \1 \2 \2;/1
+                     p
+          }" "${tmph}" \
+       | ${SORT} -u >> "${tmphd}"
+
+# reconcatenate the two
+${SED} -i "1 r ${tmphd}" "${tmph}"
+${SED} -i "${static_assert_undo}" ${tmpc}
+
+# In backwards compatible mode, assume that a "main" function is the
+# entry point
+if [ -z "${entries}" -a $(hashed defined module 0) = "0" -a $(hashed defined main 0) != "0" ] ; then
+    entries="main"
+fi
+if [ -n "${entries}" ]; then
+    report "has entries ${entries}"
+    echo "# 1 \"<${modname} entries>\""                                 >> ${tmpc}
+    echo "int $(mangleIntern ${modname} main)(int argc, char* argv[]){" >>${tmpc}
+    echo "   int ret = 0;"                                              >>${tmpc}
+    echo "   typedef int(*munpr)();"                                    >>${tmpc}
+    echo "   munpr unprot = 0;"                                         >>${tmpc}
+    echo "   typedef int(*mv)(void);"                                   >>${tmpc}
+    echo "   typedef int(*m2)(int, char**);"                            >>${tmpc}
+    echo "   typedef int(*m2p)(int*, char***);"                         >>${tmpc}
+    for entry in ${entries} ; do
+        if match *#* "${entry}" ; then
+            mang="$(mangle $(replaceID ${entry}))"
+        else
+            mang="$(mangle ${modname} ${entry})"
+        fi
+        report "handle entry $entry, $mang"
+        echo "   unprot = (munpr)${mang};"                              >>${tmpc}
+        echo "   if (!ret) {"    >>${tmpc}
+        echo "      ret = _Generic(&${mang},"                           >>${tmpc}
+        echo "                     mv:   ((mv)unprot)(),"               >>${tmpc}
+        echo "                     m2:   ((m2)unprot)(argc, argv),"     >>${tmpc}
+        echo "                     m2p: ((m2p)unprot)(&argc, &argv));"  >>${tmpc}
+        echo "   }"    >>${tmpc}
+    done
+    echo "   return ret;"                                               >>${tmpc}
+    echo "}"                                                            >>${tmpc}
+fi
+
+${CC} -o ${tmpo} ${tmpc} -c ${argv}
+
+lscript="${tmpd}/ld-skript.txt"
+resym="${tmpd}/resym.txt"
+glosym="${tmpd}/glosym.txt"
+touch ${lscript} ${resym} ${glosym}
+for a in ${aliases} ; do
+    loc="${a%%=*}"
+    al="${a#*=}"
+    echo "$(mangle ${modname} ${loc})=${al}" >> ${resym}
+    if [ -n $(hashed aliased "${loc}") ]; then
+        echo "${al}" >> ${glosym}
+    fi
+done
+for a in ${impalias} ; do
+    echo "${a}" >> ${resym}
+done
+
+
+# find all external symbols that have been produced by this compilation
+for n in `${NM} -C ${tmpo} | ${SED} -n "/^[0-9a-fA-F]* [TBCR] [a-zA-Z0-9_:]*\$/s/^[0-9a-fA-F]* [TBCR] // p"`; do
+    name="$(echo $n | ${SED} s/::/${isep}/g)"
+    name="${name#*${isep}}"
+    if [ -n "${CMOD_LEGSEP}" ] ; then
+        echo $(legacy "$name") "=" $(mangle ${name})";" >> ${lscript}
+    fi
+    onames="${onames} ${name}"
+    if [ "${name}" != "${modname}" ] ; then
+        lname="${name#*${modname}${isep}}"
+        if [ "${lname}" != "${name}" ] ; then
+            report "found $lname"
+            hashin defined "$lname" 1
+        else
+            complain "Warning, ${modname} defines unknown symbol ${name} in object file"
+        fi
+    fi
+done
+
+# This is copying the object twice and should probably be replace by a
+# single ld script.
+if [ -s ${resym} ] ; then
+    ${SED} -i 's/=/ /' ${resym}
+    objopts="${objopts} --redefine-syms=${resym}"
+fi
+if [ -s ${glosym} ] ; then
+    objopts="${objopts} --globalize-symbols=${glosym}"
+fi
+${OBJCOPY} ${objopts} ${tmpo} ${base}.o
+${MV} ${base}.o ${tmpo}
+${LD} -r -dT ${lscript} -o ${base}.o ${tmpo} ${rnames}
+
+names=$(echo "${names}" | ${SED} "s/\(${idex}\)=[a-zA-Z0-9_#]*/\1/g")
+names=$(sizesort $names)
+report "glob names: ${names}"
+report "local names: ${lnames}"
+
+incu="${tmpd}/${base}-unique.txt"
+inca="${tmpd}/${base}-alias.txt"
+incn="${tmpd}/${base}-names.txt"
+incs="${tmpd}/${base}-snames.txt"
+incl="${tmpd}/${base}-links.txt"
+incd="${tmpd}/${base}-docu.txt"
+
+touch $incu $inca $incn $incs $incl
+
+for m in ${unique} ; do
+    echo "${m}"                                     >>${incu}
+done
+for a in ${aliases} ; do
+    echo "${a}"                                     >>${inca}
+done
+for n in ${names} ; do
+    echo "${n}"                                     >>${incn}
+done
+for n in ${snames} ; do
+    echo "${n}"                                     >>${incs}
+done
+if [ $(hashed what "$(mangle ${modname})" "0") != "0" ] ; then
+    echo ": $(hashed what $(mangle ${modname}) '')"   >>${incd}
+fi
+for n in ${names} ${snames}; do
+    echo "$(mangle ${modname} ${n}) : $(hashed what $(mangle ${modname} ${n}) '')"               >>${incd}
+done
+for n in $(sizesort ${lnames}); do
+    gn="$(replaceID "$n")"
+    report "$n is ${gn} ..."
+    if [ "$(hashed keywords ${gn} 0)" = "0" ]; then
+        echo "$(mangle ${modname} ${n}) : $(hashed what $(mangle ${modname} ${n}) '')"               >>${incd}
+    fi
+done
+for l in $(hashed collectors link ""); do
+    echo "${l}"                                     >>${incl}
+done
+
+report "imps: ${imps}"
+report "unique: ${unique}"
+
+if [ -z "${job}" ]; then
+    archive="archive${jobid}${CMOD_A}"
+    garbage="${garbage} ${archive}"
+else
+    archive=${archive:=$(modbin ${modname})}
+fi
+${RM} -f "${archive}"
+
+tmpa="${tmpd}/tmp.a"
+
+ar cr "${tmpa}" ${base}.o ${anot} ${incu} ${incn} ${incs} ${incd} ${inca} ${incl} ${tmph} ${snippet}
+
+# Only produce an init TU if either there are init functions of other
+# modules to call or if we have our init or atexit functions of our
+# own.
+needsinit="${toinit}${inits}${atexits}${at_quick_exits}"
+if [ -n "${needsinit}" ] ; then
+    echo "# 1 \"<${modname} init>\""                                          >${tmpc}
+    echo "#include <signal.h>"                                               >>${tmpc}
+    echo "#include <stdlib.h>"                                               >>${tmpc}
+    for m in ${toinit} ; do
+        echo "extern void $(mangleIntern ${m}#module_init)(void);"           >>${tmpc}
+    done
+    for init in ${inits} ; do
+        echo "extern void $(mangle ${modname} ${init})(void);"               >>${tmpc}
+    done
+    for atexit in ${atexits} ; do
+        echo "extern void $(mangle ${modname} ${atexit})(void);"             >>${tmpc}
+    done
+    for at_quick_exit in ${at_quick_exits} ; do
+        echo "extern void $(mangle ${modname} ${at_quick_exit})(void);"      >>${tmpc}
+    done
+    echo "void $(mangleIntern ${modname} module_init)(void) {"               >>${tmpc}
+    echo "    static sig_atomic_t volatile is_init = 0;"                     >>${tmpc}
+    echo "    if (is_init) return;"                                          >>${tmpc}
+    echo "    is_init = 1;"                                                  >>${tmpc}
+    for m in ${toinit} ; do
+        echo "    $(mangleIntern ${m}#module_init)();"                       >>${tmpc}
+    done
+    for init in ${inits} ; do
+        echo "    $(mangle ${modname} ${init})();"                           >>${tmpc}
+    done
+    for atexit in ${atexits} ; do
+        echo "    atexit($(mangle ${modname} ${atexit}));"                   >>${tmpc}
+    done
+    for at_quick_exit in ${at_quick_exits} ; do
+        echo "    at_quick_exit($(mangle ${modname} ${at_quick_exit}));"     >>${tmpc}
+    done
+    echo "}"                                                                 >>${tmpc}
+
+    ${CC} -c -o "${tmpd}/${modname}-init.o" ${tmpc} ${argv}
+
+    ar rs "${tmpa}" "${tmpd}/${modname}-init.o"
+fi
+
+if [ -n "${entries}" ]; then
+    report "has entries ${entries}"
+    echo "# 1 \"<${modname} main>\""                                  > ${tmpc}
+    echo "int $(mangleIntern ${modname} module_init)(void);"          >>${tmpc}
+    echo "int $(mangleIntern ${modname} main)(int, char*[]);"         >>${tmpc}
+    echo "int main(int argc, char* argv[]){"                          >>${tmpc}
+    if [ -n "${needsinit}" ] ; then
+        echo "   $(mangleIntern ${modname} module_init)();"           >>${tmpc}
+    fi
+    echo "   return $(mangleIntern ${modname} main)(argc, argv);"     >>${tmpc}
+    echo "}"                                                          >>${tmpc}
+    ${CC} -c -o "${tmpd}/${modname}-entry.o" ${tmpc} ${argv}
+    ar cr "${tmpa}" "${tmpd}/${modname}-entry.o"
+fi
+
+if [ -z "${job}" ] ; then
+    $0 "${tmpa}" -o ${target:-${base}} ${argv}
+else
+    ${CP} "${tmpa}" "${archive}"
+fi
