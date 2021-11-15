@@ -1,0 +1,15 @@
+\begin{DoxyDocu}{mbrtow}
+\label{mbstrings_8h_ac5ce530f38843611b5ef023306d6f686_ac5ce530f38843611b5ef023306d6f686}
+Interpret a sequence of bytes in {\itshape c} as mb character and return that as wide character through {\itshape C}.
+
+\begin{DoxyReturn}{Returns}
+the length of the mb character or \code{-1} if an encoding error occured.
+\end{DoxyReturn}
+This function can be integrated into a sequence of such searches through a string, as long as the same {\itshape state} argument passed to all calls to this or similar functions.
+
+\begin{DoxyRemark}{Remarks}
+{\itshape state} of \code{0} indicates that {\itshape c} can be scanned without considering any context.
+\end{DoxyRemark}
+
+
+\end{DoxyDocu}

@@ -1,0 +1,20 @@
+\begin{DoxyDocu}{fprintnumbers}
+\label{numberline_8c_a8c684ce4e137661fd7a62c0d489db9ef_a8c684ce4e137661fd7a62c0d489db9ef}
+print a series of numbers {\itshape nums} on {\itshape stream}, using \code{printf} format {\itshape form}, separated by {\itshape sep} characters and terminated with a newline character.
+
+\begin{DoxyReturn}{Returns}
+the number of characters printed to {\itshape stream}, or a negative error value on error.
+\end{DoxyReturn}
+If {\itshape len} is \code{0}, an empty line is printed and \code{1} is returned.
+
+Possible error returns are:
+\begin{DoxyItemize}
+\item \code{EOF} (which is negative) if {\itshape stream} was not ready to be written to
+\item \code{-EOVERFLOW} if more than \code{INT\_MAX} characters would have to be written, including the case that {\itshape len} is greater than \code{INT\_MAX}.
+\item \code{-EFAULT} if {\itshape stream} or {\itshape numb} are \code{0}
+\item \code{-ENOMEM} if a memory error occurred
+\end{DoxyItemize}
+
+This function leaves \code{errno} to the same value as occurred on entry.
+
+\end{DoxyDocu}

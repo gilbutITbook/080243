@@ -1,0 +1,15 @@
+\begin{DoxyDocu}{mbsrdup}
+\label{mbstrings_8h_a8aef5861ae9567fceeb52d82d3565a13_a8aef5861ae9567fceeb52d82d3565a13}
+Interpret a sequence of bytes in {\itshape s} as mb string and convert it to a wide character string.
+
+\begin{DoxyReturn}{Returns}
+a newly malloc'ed wide character string of the appropriate length, \code{0} if an encoding error occurred.
+\end{DoxyReturn}
+\begin{DoxyRemark}{Remarks}
+This function can be integrated into a sequence of such searches through a string, as long as a {\itshape state} argument is passed to this function that is consistent with the mb character starting in {\itshape c}. The state itself is not modified by this function.
+
+{\itshape state} of \code{0} indicates that {\itshape s} can be scanned without considering any context.
+\end{DoxyRemark}
+
+
+\end{DoxyDocu}

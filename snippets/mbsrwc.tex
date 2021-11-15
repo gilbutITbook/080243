@@ -1,0 +1,17 @@
+\begin{DoxyDocu}{mbsrwc}
+\label{mbstrings_8h_a09325a662335595a353a0a54d985304b_a09325a662335595a353a0a54d985304b}
+Interpret a sequence of bytes in {\itshape s} as mb string and search for wide character {\itshape C}.
+
+\begin{DoxyReturn}{Returns}
+the {\itshape occurrence'th} position in {\itshape s} that starts a mb sequence corresponding to {\itshape C} or \code{0} if an encoding error occurred.
+\end{DoxyReturn}
+If the number of occurrences is less than {\itshape occurrence} the last such position is returned. So in particular using \code{SIZE\_MAX} (or \code{-1}) will always return the last occurrence.
+
+\begin{DoxyRemark}{Remarks}
+This function can be integrated into a sequence of such searches through a string, as long as the same {\itshape state} argument passed to all calls to this or similar functions and as long as the continuation of the search starts at the position that is returned by this function.
+
+{\itshape state} of \code{0} indicates that {\itshape s} can be scanned without considering any context.
+\end{DoxyRemark}
+
+
+\end{DoxyDocu}

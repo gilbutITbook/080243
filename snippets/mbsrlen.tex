@@ -1,0 +1,13 @@
+\begin{DoxyDocu}{mbsrlen}
+\label{mbstrings_8h_a39f6de516b0266a51f617056be64b5a2_a39f6de516b0266a51f617056be64b5a2}
+Interpret a mb string in {\itshape mbs} and return its length when interpreted as a wide character string.
+
+\begin{DoxyReturn}{Returns}
+the length of the mb string or \code{-1} if an encoding error occured.
+\end{DoxyReturn}
+This function can be integrated into a sequence of searches through a string, as long as a {\itshape state} argument is passed to this function that is consistent with the mb character starting in {\itshape mbs}. The state itself is not modified by this function.
+
+\begin{DoxyRemark}{Remarks}
+{\itshape state} of \code{0} indicates that {\itshape mbs} can be scanned without considering any context.
+\end{DoxyRemark}
+\end{DoxyDocu}

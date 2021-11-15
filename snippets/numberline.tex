@@ -1,0 +1,22 @@
+\begin{DoxyDocu}{numberline}
+\label{numberline_8c_ab5f1d634f58af036da64a49688535fe1_ab5f1d634f58af036da64a49688535fe1}
+interpret string {\itshape lbuf} as a sequence of numbers represented with {\itshape base}
+
+\begin{DoxyReturn}{Returns}
+a newly allocated array of numbers as found in {\itshape lbuf}
+\end{DoxyReturn}
+
+\begin{DoxyParams}{Parameters}
+{\em lbuf} & is supposed to be a string \\
+\hline
+{\em np} & if non-null, the count of numbers is stored in \code{*np} \\
+\hline
+{\em base} & value from 0 to 36, with the same interpretation as for \code{strtoul} \\
+\hline
+\end{DoxyParams}
+\begin{DoxyRemark}{Remarks}
+The caller of this function is responsible to \code{free} the array that is returned.
+\end{DoxyRemark}
+
+
+\end{DoxyDocu}

@@ -1,0 +1,11 @@
+\begin{DoxyDocu}{enable\_alignment\_check}
+\label{crash_8h_a408dcaba63f22945cfcd5cd0efbc0d68_a408dcaba63f22945cfcd5cd0efbc0d68}
+enable alignment check for i386 processors
+
+Intel's i386 processor family is quite tolerant in accepting misalignment of data. This can lead to irritating bugs when ported to other architectures that are not as tolerant.
+
+This function enables a check for this problem also for this family or processors, such that you can be sure to detect this problem early.
+
+I found that code on Ygdrasil's blog: \href{http://orchistro.tistory.com/206}{\tt http://orchistro.tistory.com/206}
+
+\end{DoxyDocu}
